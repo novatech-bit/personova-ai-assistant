@@ -27,14 +27,16 @@
 import argparse
 import asyncio
 from dataclasses import dataclass
+import json
 import random
 import os
 from pathlib import Path
 import tarfile
+import tempfile
 import time
 import secrets
 import sys
-from typing import Literal, Optional
+from typing import List, Literal, Optional
 
 import aiohttp
 from aiohttp import web
@@ -47,6 +49,11 @@ import random
 
 from .client_utils import make_log, colorize
 from .models import loaders, MimiModel, LMModel, LMGen
+from .models.lm import (
+    load_audio as lm_load_audio,
+    _iterate_audio as lm_iterate_audio,
+    encode_from_sphn as lm_encode_from_sphn,
+)
 from .utils.connection import create_ssl_context, get_lan_ip
 from .utils.logging import setup_logger, ColorizedLog
 
@@ -130,6 +137,238 @@ class ServerState:
 
         if self.device.type == 'cuda':
             torch.cuda.synchronize()
+
+    def _decode_text_token(self, token_id: int) -> str:
+        if token_id not in (0, 3):
+            piece = self.text_tokenizer.id_to_piece(token_id)
+            return piece.replace("\u2581", " ")
+        return ""
+
+    def _load_prompts_for_offline(
+        self,
+        voice_prompt_path: str,
+        text_prompt: str,
+    ) -> None:
+        """Configure and step through system prompts for offline-style inference."""
+        if voice_prompt_path.endswith(".pt"):
+            self.lm_gen.load_voice_prompt_embeddings(voice_prompt_path)
+        else:
+            self.lm_gen.load_voice_prompt(voice_prompt_path)
+        self.lm_gen.text_prompt_tokens = (
+            self.text_tokenizer.encode(wrap_with_system_tags(text_prompt))
+            if text_prompt
+            else None
+        )
+        self.mimi.reset_streaming()
+        self.other_mimi.reset_streaming()
+        self.lm_gen.reset_streaming()
+        self.lm_gen.step_system_prompts(self.mimi)
+        self.mimi.reset_streaming()
+
+    async def handle_text_to_text(self, request: web.Request) -> web.Response:
+        """POST /api/text-to-text
+
+        Accepts JSON: {"text": "...", "text_prompt": "...", "voice_prompt": "NATF2.pt",
+                        "max_tokens": 200, "silence_duration": 10.0}
+        Returns JSON: {"text": "...", "tokens": [...]}
+        """
+        async with self.lock:
+            body = await request.json()
+            # body["text"] is the user's text input (reserved for future use in text-channel injection)
+            text_prompt = body.get("text_prompt", "You are a wise and friendly teacher. Answer questions or provide advice in a clear and engaging way.")
+            voice_prompt_name = body.get("voice_prompt", "NATF2.pt")
+            max_tokens = int(body.get("max_tokens", 200))
+            silence_duration = float(body.get("silence_duration", 10.0))
+
+            voice_prompt_path = os.path.join(self.voice_prompt_dir, voice_prompt_name) if self.voice_prompt_dir else voice_prompt_name
+            if not os.path.exists(voice_prompt_path):
+                return web.json_response({"error": f"Voice prompt not found: {voice_prompt_name}"}, status=400)
+
+            self._load_prompts_for_offline(voice_prompt_path, text_prompt)
+
+            n_samples = int(silence_duration * self.mimi.sample_rate)
+            silence = np.zeros((1, n_samples), dtype=np.float32)
+
+            tokens_out: List[str] = []
+            for user_encoded in lm_encode_from_sphn(
+                self.mimi,
+                lm_iterate_audio(silence, sample_interval_size=self.frame_size, pad=True),
+                max_batch=1,
+            ):
+                for c in range(user_encoded.shape[-1]):
+                    result = self.lm_gen.step(user_encoded[:, :, c: c + 1])
+                    if result is None:
+                        continue
+                    text_id = result[0, 0, 0].item()
+                    piece = self._decode_text_token(text_id)
+                    if piece:
+                        tokens_out.append(piece)
+                    _ = self.mimi.decode(result[:, 1:9])
+                    _ = self.other_mimi.decode(result[:, 1:9])
+                    if len(tokens_out) >= max_tokens:
+                        break
+                if len(tokens_out) >= max_tokens:
+                    break
+
+            text = "".join(tokens_out).strip()
+            return web.json_response({"text": text, "tokens": tokens_out})
+
+    async def handle_voice_to_text(self, request: web.Request) -> web.Response:
+        """POST /api/voice-to-text
+
+        Accepts multipart form data with an "audio" file field.
+        Optional form fields: text_prompt, voice_prompt.
+        Returns JSON: {"text": "...", "tokens": [...]}
+        """
+        async with self.lock:
+            reader = await request.multipart()
+            audio_data = None
+            text_prompt = "You are a wise and friendly teacher. Answer questions or provide advice in a clear and engaging way."
+            voice_prompt_name = "NATF2.pt"
+
+            while True:
+                part = await reader.next()
+                if part is None:
+                    break
+                if part.name == "audio":
+                    audio_data = await part.read()
+                elif part.name == "text_prompt":
+                    text_prompt = (await part.read()).decode("utf-8")
+                elif part.name == "voice_prompt":
+                    voice_prompt_name = (await part.read()).decode("utf-8")
+
+            if audio_data is None:
+                return web.json_response({"error": "No audio file provided"}, status=400)
+
+            voice_prompt_path = os.path.join(self.voice_prompt_dir, voice_prompt_name) if self.voice_prompt_dir else voice_prompt_name
+            if not os.path.exists(voice_prompt_path):
+                return web.json_response({"error": f"Voice prompt not found: {voice_prompt_name}"}, status=400)
+
+            self._load_prompts_for_offline(voice_prompt_path, text_prompt)
+
+            # Write temp WAV and load
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp.write(audio_data)
+                tmp_path = tmp.name
+            try:
+                user_audio = lm_load_audio(tmp_path, self.mimi.sample_rate)
+            finally:
+                os.unlink(tmp_path)
+
+            tokens_out: List[str] = []
+            for user_encoded in lm_encode_from_sphn(
+                self.mimi,
+                lm_iterate_audio(user_audio, sample_interval_size=self.frame_size, pad=True),
+                max_batch=1,
+            ):
+                for c in range(user_encoded.shape[-1]):
+                    result = self.lm_gen.step(user_encoded[:, :, c: c + 1])
+                    if result is None:
+                        continue
+                    text_id = result[0, 0, 0].item()
+                    piece = self._decode_text_token(text_id)
+                    if piece:
+                        tokens_out.append(piece)
+                    _ = self.mimi.decode(result[:, 1:9])
+                    _ = self.other_mimi.decode(result[:, 1:9])
+
+            text = "".join(tokens_out).strip()
+            return web.json_response({"text": text, "tokens": tokens_out})
+
+    async def handle_voice_to_voice(self, request: web.Request) -> web.Response:
+        """POST /api/voice-to-voice
+
+        Accepts multipart form data with an "audio" file field.
+        Optional form fields: text_prompt, voice_prompt.
+        Returns the generated audio as a WAV file with a JSON header containing text.
+        """
+        async with self.lock:
+            reader = await request.multipart()
+            audio_data = None
+            text_prompt = "You are a wise and friendly teacher. Answer questions or provide advice in a clear and engaging way."
+            voice_prompt_name = "NATF2.pt"
+
+            while True:
+                part = await reader.next()
+                if part is None:
+                    break
+                if part.name == "audio":
+                    audio_data = await part.read()
+                elif part.name == "text_prompt":
+                    text_prompt = (await part.read()).decode("utf-8")
+                elif part.name == "voice_prompt":
+                    voice_prompt_name = (await part.read()).decode("utf-8")
+
+            if audio_data is None:
+                return web.json_response({"error": "No audio file provided"}, status=400)
+
+            voice_prompt_path = os.path.join(self.voice_prompt_dir, voice_prompt_name) if self.voice_prompt_dir else voice_prompt_name
+            if not os.path.exists(voice_prompt_path):
+                return web.json_response({"error": f"Voice prompt not found: {voice_prompt_name}"}, status=400)
+
+            self._load_prompts_for_offline(voice_prompt_path, text_prompt)
+
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as tmp:
+                tmp.write(audio_data)
+                tmp_path = tmp.name
+            try:
+                user_audio = lm_load_audio(tmp_path, self.mimi.sample_rate)
+            finally:
+                os.unlink(tmp_path)
+
+            total_target_samples = user_audio.shape[-1]
+            generated_frames: List[np.ndarray] = []
+            tokens_out: List[str] = []
+
+            for user_encoded in lm_encode_from_sphn(
+                self.mimi,
+                lm_iterate_audio(user_audio, sample_interval_size=self.frame_size, pad=True),
+                max_batch=1,
+            ):
+                for c in range(user_encoded.shape[-1]):
+                    result = self.lm_gen.step(user_encoded[:, :, c: c + 1])
+                    if result is None:
+                        continue
+                    pcm = self.mimi.decode(result[:, 1:9])
+                    _ = self.other_mimi.decode(result[:, 1:9])
+                    pcm = pcm.detach().cpu().numpy()[0, 0]
+                    generated_frames.append(pcm)
+                    text_id = result[0, 0, 0].item()
+                    piece = self._decode_text_token(text_id)
+                    if piece:
+                        tokens_out.append(piece)
+
+            if not generated_frames:
+                return web.json_response({"error": "No audio frames generated"}, status=500)
+
+            output_pcm = np.concatenate(generated_frames, axis=-1)
+            if output_pcm.shape[-1] > total_target_samples:
+                output_pcm = output_pcm[:total_target_samples]
+            elif output_pcm.shape[-1] < total_target_samples:
+                pad_len = total_target_samples - output_pcm.shape[-1]
+                output_pcm = np.concatenate(
+                    [output_pcm, np.zeros(pad_len, dtype=output_pcm.dtype)], axis=-1
+                )
+
+            with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as out_tmp:
+                sphn.write_wav(out_tmp.name, output_pcm, self.mimi.sample_rate)
+                out_tmp_path = out_tmp.name
+
+            try:
+                with open(out_tmp_path, "rb") as f:
+                    wav_bytes = f.read()
+            finally:
+                os.unlink(out_tmp_path)
+
+            text = "".join(tokens_out).strip()
+            response = web.Response(
+                body=wav_bytes,
+                content_type="audio/wav",
+                headers={
+                    "X-Generated-Text": json.dumps({"text": text, "tokens": tokens_out}),
+                },
+            )
+            return response
 
 
     async def handle_chat(self, request):
@@ -458,6 +697,12 @@ def main():
     state.warmup()
     app = web.Application()
     app.router.add_get("/api/chat", state.handle_chat)
+    app.router.add_post("/api/text-to-text", state.handle_text_to_text)
+    app.router.add_post("/api/voice-to-text", state.handle_voice_to_text)
+    app.router.add_post("/api/voice-to-voice", state.handle_voice_to_voice)
+
+    # Serve Aziza UI from jarvis-ui/ directory (sibling to moshi/)
+    jarvis_ui_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "jarvis-ui")
     if static_path is not None:
         async def handle_root(_):
             return web.FileResponse(os.path.join(static_path, "index.html"))
@@ -466,6 +711,15 @@ def main():
         app.router.add_get("/", handle_root)
         app.router.add_static(
             "/", path=static_path, follow_symlinks=True, name="static"
+        )
+    elif os.path.isdir(jarvis_ui_path):
+        async def handle_aziza_root(_):
+            return web.FileResponse(os.path.join(jarvis_ui_path, "index.html"))
+
+        logger.info(f"serving Aziza UI from {jarvis_ui_path}")
+        app.router.add_get("/", handle_aziza_root)
+        app.router.add_static(
+            "/ui", path=jarvis_ui_path, follow_symlinks=True, name="aziza_ui"
         )
     protocol = "http"
     ssl_context = None

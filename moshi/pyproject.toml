@@ -1,7 +1,7 @@
 [project]
 name = "moshi-personaplex"
 requires-python = ">= 3.10"
-description = "Personaplex finetune of moshi to enable role and voice control."
+description = "Personaplex finetune of moshi to enable role and voice control with full-duplex text-to-text, voice-to-text, and voice-to-voice pipelines."
 dependencies = [
     "numpy >= 1.26, < 2.2",
     "safetensors >= 0.4.0, < 0.5",
@@ -12,6 +12,7 @@ dependencies = [
     "sphn >= 0.1.4, < 0.2",
     "torch >= 2.2.0, < 2.5",
     "aiohttp>=3.10.5, <3.11",
+    "pyloudnorm >= 0.1.0",
 ]
 authors = [{name="Rajarshi Roy", email="rajarshir@nvidia.com"}]
 maintainers = [{name="Rajarshi Roy", email="rajarshir@nvidia.com"}]
@@ -22,6 +23,9 @@ readme = "README.md"
 [project.scripts]
 moshi-server = "moshi.server:main"
 moshi-offline = "moshi.offline:main"
+moshi-text-to-text = "moshi.text_to_text:main"
+moshi-voice-to-text = "moshi.voice_to_text:main"
+moshi-evaluate = "moshi.evaluation.runner:main"
 
 [tool.setuptools.dynamic]
 version = {attr = "moshi.__version__"}
