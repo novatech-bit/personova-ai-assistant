@@ -14,5 +14,7 @@ from . import utils
 from . import modules
 from . import models
 from . import quantization
+from . import pipeline
+from . import evaluation
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

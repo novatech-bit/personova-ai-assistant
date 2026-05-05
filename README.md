@@ -156,6 +156,91 @@ Personaplex finetunes Moshi and benefits from the generalization capabilities of
 You enjoy having a good conversation. Have a technical discussion about fixing a reactor core on a spaceship to Mars. You are an astronaut on a Mars mission. Your name is Alex. You are already dealing with a reactor core meltdown on a Mars mission. Several ship systems are failing, and continued instability will lead to catastrophic failure. You explain what is happening and you urgently ask for help thinking through how to stabilize the reactor.
 ```
 
+## Multi-Modal Pipelines
+
+PersonaPlex supports three inference modes through a unified pipeline API:
+
+### Text-to-Text
+
+Feed text input and capture only the model's text response (silence is used as audio input):
+
+```bash
+python -m moshi.text_to_text \
+  --user-text "What is the speed of light?" \
+  --voice-prompt "NATF2.pt" \
+  --output-text "output.json"
+```
+
+### Voice-to-Text
+
+Feed audio input and capture only the model's text response:
+
+```bash
+python -m moshi.voice_to_text \
+  --input-wav "input.wav" \
+  --voice-prompt "NATF2.pt" \
+  --output-text "output.json"
+```
+
+### Voice-to-Voice (existing)
+
+Feed audio input and produce both text and audio output (see [Offline Evaluation](#offline-evaluation) above).
+
+### REST API Endpoints
+
+The server also exposes REST API endpoints for programmatic access:
+
+- **POST `/api/text-to-text`**: JSON body `{"text": "...", "text_prompt": "...", "voice_prompt": "NATF2.pt", "max_tokens": 200}`
+  Returns: `{"text": "...", "tokens": [...]}`
+
+- **POST `/api/voice-to-text`**: Multipart form with `audio` file field, optional `text_prompt` and `voice_prompt` fields.
+  Returns: `{"text": "...", "tokens": [...]}`
+
+- **POST `/api/voice-to-voice`**: Multipart form with `audio` file field, optional `text_prompt` and `voice_prompt` fields.
+  Returns: WAV audio file with `X-Generated-Text` header containing the text JSON.
+
+### Python API
+
+```python
+from moshi.pipeline import TextToTextPipeline, VoiceToTextPipeline, VoiceToVoicePipeline
+
+# Text-to-text
+t2t = TextToTextPipeline(device="cuda", voice_prompt="NATF2.pt")
+result = t2t.run(user_text="What is quantum computing?")
+print(result.text)
+
+# Voice-to-text
+v2t = VoiceToTextPipeline(device="cuda", voice_prompt="NATF2.pt")
+result = v2t.run(input_wav="input.wav")
+print(result.text)
+
+# Voice-to-voice
+v2v = VoiceToVoicePipeline(device="cuda", voice_prompt="NATF2.pt")
+result = v2v.run(input_wav="input.wav", output_wav="output.wav")
+print(result.text)  # text response
+# result.audio_pcm contains the raw audio
+```
+
+## Full-Duplex-Bench Evaluation
+
+Run the [Full-Duplex-Bench](https://arxiv.org/abs/2503.04721) evaluation suite to assess turn-taking capabilities:
+
+```bash
+python -m moshi.evaluation.runner \
+  --dataset-dir /path/to/fullduplexbench/dataset \
+  --output-dir /path/to/results \
+  --categories pause_handling turn_taking interruption \
+  --voice-prompt "NATF2.pt"
+```
+
+This evaluates:
+- **Pause Handling**: Does the model wait during user pauses?
+- **Backchanneling**: Does the model produce listener feedback at appropriate moments?
+- **Smooth Turn-Taking**: How naturally does the model transition between turns?
+- **User Interruption**: Does the model stop speaking when interrupted?
+
+Results are written to `summary.json` with per-category metrics.
+
 ## License
 
 The present code is provided under the MIT license. The weights for the models are released under the NVIDIA Open Model license.
