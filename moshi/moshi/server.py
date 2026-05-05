@@ -700,6 +700,9 @@ def main():
     app.router.add_post("/api/text-to-text", state.handle_text_to_text)
     app.router.add_post("/api/voice-to-text", state.handle_voice_to_text)
     app.router.add_post("/api/voice-to-voice", state.handle_voice_to_voice)
+
+    # Serve Aziza UI from jarvis-ui/ directory (sibling to moshi/)
+    jarvis_ui_path = os.path.join(os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))), "jarvis-ui")
     if static_path is not None:
         async def handle_root(_):
             return web.FileResponse(os.path.join(static_path, "index.html"))
@@ -708,6 +711,15 @@ def main():
         app.router.add_get("/", handle_root)
         app.router.add_static(
             "/", path=static_path, follow_symlinks=True, name="static"
+        )
+    elif os.path.isdir(jarvis_ui_path):
+        async def handle_aziza_root(_):
+            return web.FileResponse(os.path.join(jarvis_ui_path, "index.html"))
+
+        logger.info(f"serving Aziza UI from {jarvis_ui_path}")
+        app.router.add_get("/", handle_aziza_root)
+        app.router.add_static(
+            "/ui", path=jarvis_ui_path, follow_symlinks=True, name="aziza_ui"
         )
     protocol = "http"
     ssl_context = None
