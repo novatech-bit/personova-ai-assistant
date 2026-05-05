@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>PERSONOVA - AI Assistant</title>
+  <title>AZIZA - AI Assistant</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@400;500;600;700;800;900&family=Rajdhani:wght@300;400;500;600;700&family=Share+Tech+Mono&display=swap" rel="stylesheet" />
@@ -483,7 +483,7 @@
   <div class="app-container">
     <!-- HEADER -->
     <div class="header">
-      <div class="logo">PERSONOVA</div>
+      <div class="logo">AZIZA</div>
       <div class="status-bar">
         <span class="clock" id="clock"></span>
         <div class="status-dot" id="status-dot"></div>
@@ -566,7 +566,7 @@
         <div class="chat-area">
           <div class="messages-container" id="messages">
             <div class="empty-state" id="empty-state">
-              <div class="logo-large">PERSONOVA</div>
+              <div class="logo-large">AZIZA</div>
               <p>Full-duplex AI assistant powered by PersonaPlex &amp; Moshi.<br/>Select a mode and start interacting.</p>
             </div>
           </div>
@@ -734,7 +734,7 @@
       const msg = document.createElement('div');
       msg.className = `message ${role}`;
 
-      let label = role === 'user' ? 'YOU' : 'PERSONOVA';
+      let label = role === 'user' ? 'YOU' : 'AZIZA';
       let html = `<div class="msg-label">${label}</div><div>${text}</div>`;
       if (audioUrl) {
         html += `<div class="msg-audio"><audio controls src="${audioUrl}"></audio></div>`;
